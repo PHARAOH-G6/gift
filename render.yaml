@@ -1,9 +1,8 @@
 services:
-  - type: cron
+  - type: web
     name: gift-bot
     runtime: python
-    schedule: "*/5 * * * *"
-    plan: starter
+    plan: free
     buildCommand: pip install -r requirements.txt
     startCommand: python bot.py
     envVars:
@@ -14,4 +13,6 @@ services:
       - key: UPSTASH_REDIS_REST_URL
         sync: false
       - key: UPSTASH_REDIS_REST_TOKEN
+        sync: false
+      - key: WEBHOOK_URL
         sync: false
