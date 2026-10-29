@@ -30,17 +30,16 @@ DATABASE_URL = os.environ.get("DATABASE_URL", "")
 
 def get_conn():
     """Устанавливает соединение с базой данных Neon."""
-    return psycopg2.connect(DATABASE_URL, sslmode='require')
+    # Увеличиваем таймаут, так как Neon может просыпаться
+    return psycopg2.connect(DATABASE_URL, sslmode='require', connect_timeout=15)
 
 def init_db():
-    """Создает таблицы при первом запуске."""
     if not DATABASE_URL:
         logger.error("DATABASE_URL не задан!")
         return
     try:
         conn = get_conn()
         cur = conn.cursor()
-        # Таблица промокодов
         cur.execute("""
             CREATE TABLE IF NOT EXISTS promos (
                 code VARCHAR(50) PRIMARY KEY,
@@ -49,7 +48,6 @@ def init_db():
                 active BOOLEAN DEFAULT TRUE
             );
         """)
-        # Таблица заказов
         cur.execute("""
             CREATE TABLE IF NOT EXISTS orders (
                 id SERIAL PRIMARY KEY,
@@ -68,7 +66,6 @@ def init_db():
                 status VARCHAR(50) DEFAULT 'новый'
             );
         """)
-        # Таблица пользователей для рассылки
         cur.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id BIGINT PRIMARY KEY
@@ -367,8 +364,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         order_id = str(parts[1])
         new_status = parts[2]
         
-        # Сначала обновляем, потом проверяем, что заказ существует (по факту обновления)
-        # Но лучше сначала получить, чтобы знать user_id
         order = get_order(order_id)
         if order:
             if update_order_status(order_id, new_status):
@@ -402,18 +397,34 @@ async def finalize_order(query, context):
     
     if order_id:
         await query.edit_message_text(f"✅ Заказ #{order_id} оформлен!\n\n💰 Итого: {order_data['final_price']} BYN (скидка {order_data['discount']}%)")
-        # Формируем заказ для админа с ID из базы
         order_data["id"] = order_id 
+        
+        # Отправка админу с ОБРАБОТКОЙ ОШИБОК
         try:
+            logger.info(f"Отправка заказа #{order_id} админу {ADMIN_ID}...")
             await context.bot.send_message(
                 chat_id=ADMIN_ID,
                 text=f"🆕 Новый заказ!\n\n{format_order(order_data)}",
                 reply_markup=order_status_menu(order_id),
             )
+            logger.info(f"Заказ #{order_id} успешно отправлен админу.")
         except Exception as e:
-            logger.error(f"Не удалось отправить админу: {e}")
+            logger.error(f"ОШИБКА отправки админу: {e}")
+            # Попытка отправить хотя бы текстовое сообщение без кнопок
+            try:
+                await context.bot.send_message(
+                    chat_id=ADMIN_ID,
+                    text=f"🆕 Новый заказ (без кнопок)!\n\n{format_order(order_data)}"
+                )
+            except Exception as e2:
+                logger.error(f"Повторная ошибка: {e2}")
     else:
-        await query.edit_message_text("❌ Ошибка при оформлении заказа. Попробуйте позже.")
+        await query.edit_message_text("❌ Ошибка при оформлении заказа в базе данных.")
+        # Уведомляем админа о сбое
+        try:
+            await context.bot.send_message(chat_id=ADMIN_ID, text="⚠️ Внимание: произошла ошибка записи заказа в базу. Проверьте логи Neon.")
+        except Exception:
+            pass
 
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
