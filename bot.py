@@ -34,26 +34,37 @@ LOCAL_PROMOS = {}
 # ========== UPSTASH REDIS (REST API) ==========
 
 def redis_set(key, value):
+    """Надежная запись в Upstash Redis."""
     if not UPSTASH_URL or not UPSTASH_TOKEN:
         return False
     try:
-        payload = json.dumps(value, ensure_ascii=False) if not isinstance(value, str) else value
+        # Если передали dict/list — сериализуем в JSON строку
+        if isinstance(value, (dict, list)):
+            value_str = json.dumps(value, ensure_ascii=False)
+        else:
+            value_str = str(value)
+            
+        # В Upstash REST API правильный формат для SET: тело запроса - просто строка
         r = requests.post(
             f"{UPSTASH_URL}/set/{key}",
             headers={
                 "Authorization": f"Bearer {UPSTASH_TOKEN}",
-                "Content-Type": "application/json",
+                "Content-Type": "text/plain",
             },
-            data=payload,
+            data=value_str.encode('utf-8'),
             timeout=10,
         )
-        return r.status_code == 200
+        if r.status_code != 200:
+            logger.error(f"Redis SET error {key}: {r.status_code} {r.text}")
+            return False
+        return True
     except Exception as e:
-        logger.error(f"redis_set error: {e}")
+        logger.error(f"redis_set exception {key}: {e}")
         return False
 
 
 def redis_get(key):
+    """Надежное чтение из Upstash Redis."""
     if not UPSTASH_URL or not UPSTASH_TOKEN:
         return None
     try:
@@ -66,21 +77,26 @@ def redis_get(key):
         result = data.get("result")
         if result is None:
             return None
-        return json.loads(result) if result.startswith("{") else result
+            
+        # Пытаемся распарсить JSON (для заказов и списков)
+        try:
+            return json.loads(result)
+        except (json.JSONDecodeError, TypeError):
+            # Если это обычная строка (например, счетчик)
+            return result
     except Exception as e:
-        logger.error(f"redis_get error: {e}")
+        logger.error(f"redis_get exception {key}: {e}")
         return None
 
 
 # ========== ЛОГИКА ДАННЫХ ==========
 
 def save_promo(code, data):
-    LOCAL_PROMOS[code] = data  # Сохраняем локально
-    redis_set(f"promo:{code}", data)  # И в Redis
+    LOCAL_PROMOS[code] = data
+    redis_set(f"promo:{code}", data)
 
 
 def get_promo(code):
-    # Сначала ищем локально, потом в Redis
     if code in LOCAL_PROMOS:
         return LOCAL_PROMOS[code]
     return redis_get(f"promo:{code}")
@@ -91,17 +107,31 @@ def get_next_order_id():
     if not val:
         redis_set("order_counter", 1)
         return "1"
-    new_val = int(val) + 1
+    try:
+        new_val = int(val) + 1
+    except ValueError:
+        new_val = 2
     redis_set("order_counter", new_val)
     return str(new_val)
 
 
 def save_order(order_id, order_data):
-    redis_set(f"order:{order_id}", order_data)
+    logger.info(f"Сохранение заказа #{order_id} в Redis...")
+    success = redis_set(f"order:{order_id}", order_data)
+    if success:
+        logger.info(f"Заказ #{order_id} успешно сохранен.")
+    else:
+        logger.error(f"ОШИБКА сохранения заказа #{order_id}!")
 
 
 def get_order(order_id):
-    return redis_get(f"order:{order_id}")
+    logger.info(f"Чтение заказа #{order_id} из Redis...")
+    order = redis_get(f"order:{order_id}")
+    if order:
+        logger.info(f"Заказ #{order_id} найден.")
+    else:
+        logger.warning(f"Заказ #{order_id} НЕ найден в Redis.")
+    return order
 
 
 def add_user(uid):
@@ -215,7 +245,6 @@ def check_promo(promo_code):
     code = promo_code.strip().upper()
     promo = get_promo(code)
     if not promo:
-        logger.warning(f"Промокод {code} не найден.")
         return None, "Промокод не найден."
         
     expires_at = promo.get("expires_at")
@@ -337,7 +366,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception as e:
                 logger.warning(f"Не удалось оповестить: {e}")
         else:
-            await query.edit_message_text(f"❌ Заказ {order_id} не найден.")
+            await query.edit_message_text(f"❌ Заказ {order_id} не найден в базе данных.")
         return
 
 
@@ -364,8 +393,9 @@ async def finalize_order(query, context):
         "status": "новый",
     }
     
+    # Сохраняем и проверяем, что заказ реально записался
     save_order(order_id, order)
-
+    
     await query.edit_message_text(f"✅ Заказ #{order_id} оформлен!\n\n💰 Итого: {final_price} BYN (скидка {discount}%)")
 
     try:
