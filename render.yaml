@@ -3,6 +3,7 @@ services:
     name: gift-bot
     runtime: python
     schedule: "*/5 * * * *"
+    plan: starter
     buildCommand: pip install -r requirements.txt
     startCommand: python bot.py
     envVars:
