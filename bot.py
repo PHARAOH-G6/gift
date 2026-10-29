@@ -4,7 +4,8 @@ import logging
 import asyncio
 from datetime import datetime, timedelta
 
-from upstash_redis import Redis
+import psycopg2
+from psycopg2.extras import RealDictCursor
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -23,82 +24,165 @@ TOKEN = os.environ.get("BOT_TOKEN", "")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "").rstrip("/")
 PORT = int(os.environ.get("PORT", "10000"))
+DATABASE_URL = os.environ.get("DATABASE_URL", "")
 
-# Upstash Redis (SDK)
-UPSTASH_URL = os.environ.get("UPSTASH_REDIS_REST_URL", "")
-UPSTASH_TOKEN = os.environ.get("UPSTASH_REDIS_REST_TOKEN", "")
+# ========== БАЗА ДАННЫХ (POSTGRESQL) ==========
 
-# Инициализация клиента Upstash
-redis = Redis(url=UPSTASH_URL, token=UPSTASH_TOKEN)
+def get_conn():
+    """Устанавливает соединение с базой данных Neon."""
+    return psycopg2.connect(DATABASE_URL, sslmode='require')
 
-# ========== ЛОГИКА ДАННЫХ ==========
+def init_db():
+    """Создает таблицы при первом запуске."""
+    if not DATABASE_URL:
+        logger.error("DATABASE_URL не задан!")
+        return
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        # Таблица промокодов
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS promos (
+                code VARCHAR(50) PRIMARY KEY,
+                discount INT NOT NULL,
+                expires_at TIMESTAMP NOT NULL,
+                active BOOLEAN DEFAULT TRUE
+            );
+        """)
+        # Таблица заказов
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS orders (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                username VARCHAR(255),
+                category_name VARCHAR(100),
+                subcategory_name VARCHAR(100),
+                size VARCHAR(10),
+                price INT,
+                discount INT DEFAULT 0,
+                final_price INT,
+                preferences TEXT,
+                exclude TEXT,
+                promo VARCHAR(50),
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                status VARCHAR(50) DEFAULT 'новый'
+            );
+        """)
+        # Таблица пользователей для рассылки
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id BIGINT PRIMARY KEY
+            );
+        """)
+        conn.commit()
+        cur.close()
+        conn.close()
+        logger.info("База данных инициализирована.")
+    except Exception as e:
+        logger.error(f"Ошибка инициализации БД: {e}")
 
-def save_promo(code, data):
-    redis.set(f"promo:{code}", json.dumps(data, ensure_ascii=False))
+def save_promo(code, discount, expires_at):
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO promos (code, discount, expires_at) VALUES (%s, %s, %s) "
+            "ON CONFLICT (code) DO UPDATE SET discount=EXCLUDED.discount, expires_at=EXCLUDED.expires_at, active=TRUE",
+            (code.upper(), discount, expires_at)
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
+        return True
+    except Exception as e:
+        logger.error(f"Ошибка сохранения промокода: {e}")
+        return False
 
 def get_promo(code):
-    result = redis.get(f"promo:{code}")
-    if result is None:
-        return None
     try:
-        return json.loads(result)
-    except json.JSONDecodeError:
+        conn = get_conn()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute("SELECT * FROM promos WHERE code = %s AND active = TRUE", (code.upper(),))
+        promo = cur.fetchone()
+        cur.close()
+        conn.close()
+        return promo
+    except Exception as e:
+        logger.error(f"Ошибка получения промокода: {e}")
         return None
 
-def get_next_order_id():
-    val = redis.get("order_counter")
-    if val is None:
-        redis.set("order_counter", 1)
-        return "1"
+def save_order(order_data):
     try:
-        new_val = int(val) + 1
-    except (ValueError, TypeError):
-        new_val = 2
-    redis.set("order_counter", new_val)
-    return str(new_val)
-
-def save_order(order_id, order_data):
-    logger.info(f"Сохранение заказа #{order_id} в Redis...")
-    redis.set(f"order:{order_id}", json.dumps(order_data, ensure_ascii=False))
-    logger.info(f"Заказ #{order_id} успешно сохранен.")
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO orders (user_id, username, category_name, subcategory_name, size, price, discount, final_price, preferences, exclude, promo)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING id;
+        """, (
+            order_data["user_id"], order_data["username"], order_data["category_name"],
+            order_data["subcategory_name"], order_data["size"], order_data["price"],
+            order_data["discount"], order_data["final_price"], order_data["preferences"],
+            order_data["exclude"], order_data["promo"]
+        ))
+        order_id = cur.fetchone()[0]
+        conn.commit()
+        cur.close()
+        conn.close()
+        return str(order_id)
+    except Exception as e:
+        logger.error(f"Ошибка сохранения заказа: {e}")
+        return None
 
 def get_order(order_id):
-    logger.info(f"Чтение заказа #{order_id} из Redis...")
-    result = redis.get(f"order:{order_id}")
-    if result is None:
-        logger.warning(f"Заказ #{order_id} НЕ найден в Redis.")
-        return None
     try:
-        order = json.loads(result)
-        logger.info(f"Заказ #{order_id} найден.")
+        conn = get_conn()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute("SELECT * FROM orders WHERE id = %s", (int(order_id),))
+        order = cur.fetchone()
+        cur.close()
+        conn.close()
         return order
-    except json.JSONDecodeError:
+    except Exception as e:
+        logger.error(f"Ошибка получения заказа: {e}")
         return None
+
+def update_order_status(order_id, new_status):
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("UPDATE orders SET status = %s WHERE id = %s", (new_status, int(order_id)))
+        conn.commit()
+        cur.close()
+        conn.close()
+        return True
+    except Exception as e:
+        logger.error(f"Ошибка обновления статуса: {e}")
+        return False
 
 def add_user(uid):
-    users = redis.get("users")
-    if users is None:
-        users_list = []
-    else:
-        try:
-            users_list = json.loads(users)
-            if not isinstance(users_list, list):
-                users_list = []
-        except json.JSONDecodeError:
-            users_list = []
-    if uid not in users_list:
-        users_list.append(uid)
-        redis.set("users", json.dumps(users_list, ensure_ascii=False))
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("INSERT INTO users (user_id) VALUES (%s) ON CONFLICT DO NOTHING", (uid,))
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        logger.error(f"Ошибка добавления пользователя: {e}")
 
 def get_users():
-    users = redis.get("users")
-    if users is None:
-        return []
     try:
-        return json.loads(users)
-    except json.JSONDecodeError:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT user_id FROM users")
+        users = [row[0] for row in cur.fetchall()]
+        cur.close()
+        conn.close()
+        return users
+    except Exception as e:
+        logger.error(f"Ошибка получения пользователей: {e}")
         return []
-
 
 # ========== КЛАВИАТУРЫ ==========
 
@@ -111,19 +195,9 @@ def main_menu():
 
 def subcat_menu(category):
     if category == "girl":
-        subs = [
-            ("Для мамы", "sub_girl_mom"),
-            ("Для подруги", "sub_girl_friend"),
-            ("Для любимой", "sub_girl_love"),
-            ("Для сестры", "sub_girl_sister"),
-        ]
+        subs = [("Для мамы", "sub_girl_mom"), ("Для подруги", "sub_girl_friend"), ("Для любимой", "sub_girl_love"), ("Для сестры", "sub_girl_sister")]
     else:
-        subs = [
-            ("Для папы", "sub_boy_dad"),
-            ("Для друга", "sub_boy_friend"),
-            ("Для любимого", "sub_boy_love"),
-            ("Для брата", "sub_boy_brother"),
-        ]
+        subs = [("Для папы", "sub_boy_dad"), ("Для друга", "sub_boy_friend"), ("Для любимого", "sub_boy_love"), ("Для брата", "sub_boy_brother")]
     keyboard = [[InlineKeyboardButton(name, callback_data=cb)] for name, cb in subs]
     keyboard.append([InlineKeyboardButton("⬅️ Назад", callback_data="back_main")])
     return InlineKeyboardMarkup(keyboard)
@@ -169,7 +243,6 @@ def order_status_menu(order_id):
     ]
     return InlineKeyboardMarkup(keyboard)
 
-
 # ========== ХЕЛПЕРЫ ==========
 
 def format_order(order):
@@ -186,7 +259,7 @@ def format_order(order):
         f"✅ Предпочтения: {prefs}",
         f"🚫 Исключить: {exclude}",
         f"👤 Покупатель: @{order.get('username', '—')} (ID: {order['user_id']})",
-        f"📅 {order['created_at']}",
+        f"📅 {order['created_at'].strftime('%Y-%m-%d %H:%M') if order['created_at'] else '—'}",
         f"📌 Статус: {order.get('status', 'новый')}",
     ]
     return "\n".join(lines)
@@ -196,16 +269,9 @@ def check_promo(promo_code):
     promo = get_promo(code)
     if not promo:
         return None, "Промокод не найден."
-    expires_at = promo.get("expires_at")
-    if expires_at:
-        try:
-            exp = datetime.fromisoformat(expires_at)
-            if datetime.now() > exp:
-                return None, f"Промокод истёк {exp.strftime('%Y-%m-%d %H:%M')}."
-        except Exception:
-            pass
+    if promo["expires_at"] and datetime.now() > promo["expires_at"]:
+        return None, f"Промокод истёк {promo['expires_at'].strftime('%Y-%m-%d %H:%M')}."
     return promo["discount"], None
-
 
 # ========== ХЕНДЛЕРЫ ==========
 
@@ -216,7 +282,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()  # Отвечаем сразу, чтобы кнопка не "висела"
+    await query.answer()
     data_cb = query.data
 
     if data_cb == "back_main":
@@ -235,10 +301,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parts = data_cb.split("_", 2)
         cat = parts[1]
         sub_key = parts[2]
-        sub_names = {
-            "mom": "Для мамы", "friend": "Для подруги", "love": "Для любимой", "sister": "Для сестры",
-            "dad": "Для папы", "brother": "Для брата"
-        }
+        sub_names = {"mom": "Для мамы", "friend": "Для подруги", "love": "Для любимой", "sister": "Для сестры", "dad": "Для папы", "brother": "Для брата"}
         if cat == "boy" and sub_key == "friend": sub_name = "Для друга"
         elif cat == "boy" and sub_key == "love": sub_name = "Для любимого"
         else: sub_name = sub_names.get(sub_key, sub_key)
@@ -303,54 +366,54 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parts = data_cb.split("_", 2)
         order_id = str(parts[1])
         new_status = parts[2]
+        
+        # Сначала обновляем, потом проверяем, что заказ существует (по факту обновления)
+        # Но лучше сначала получить, чтобы знать user_id
         order = get_order(order_id)
         if order:
-            order["status"] = new_status
-            save_order(order_id, order)
-            await query.edit_message_text(f"Статус заказа #{order_id} изменён на: {new_status}")
-            try:
-                await context.bot.send_message(chat_id=order["user_id"], text=f"📬 Статус вашего заказа #{order_id} обновлён: {new_status}")
-            except Exception as e:
-                logger.warning(f"Не удалось оповестить: {e}")
+            if update_order_status(order_id, new_status):
+                await query.edit_message_text(f"Статус заказа #{order_id} изменён на: {new_status}")
+                try:
+                    await context.bot.send_message(chat_id=order["user_id"], text=f"📬 Статус вашего заказа #{order_id} обновлён: {new_status}")
+                except Exception as e:
+                    logger.warning(f"Не удалось оповестить: {e}")
+            else:
+                await query.edit_message_text("Ошибка при обновлении статуса.")
         else:
-            await query.edit_message_text(f"❌ Заказ {order_id} не найден в базе данных.")
+            await query.edit_message_text(f"❌ Заказ {order_id} не найден.")
         return
 
 async def finalize_order(query, context):
-    order_id = get_next_order_id()
-    base_price = context.user_data.get("price", 0)
-    discount = context.user_data.get("discount", 0)
-    final_price = int(base_price * (100 - discount) / 100)
-
-    order = {
-        "id": order_id,
+    order_data = {
         "user_id": query.from_user.id,
         "username": query.from_user.username or "—",
         "category_name": context.user_data.get("category_name", "—"),
         "subcategory_name": context.user_data.get("subcategory_name", "—"),
         "size": context.user_data.get("size", "—"),
-        "price": base_price,
-        "discount": discount,
-        "final_price": final_price,
+        "price": context.user_data.get("price", 0),
+        "discount": context.user_data.get("discount", 0),
+        "final_price": int(context.user_data.get("price", 0) * (100 - context.user_data.get("discount", 0)) / 100),
         "preferences": context.user_data.get("prefs_add", "—"),
         "exclude": context.user_data.get("prefs_exclude", "—"),
         "promo": context.user_data.get("applied_promo") or "—",
-        "created_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
-        "status": "новый",
     }
     
-    save_order(order_id, order)
+    order_id = save_order(order_data)
     
-    await query.edit_message_text(f"✅ Заказ #{order_id} оформлен!\n\n💰 Итого: {final_price} BYN (скидка {discount}%)")
-
-    try:
-        await context.bot.send_message(
-            chat_id=ADMIN_ID,
-            text=f"🆕 Новый заказ!\n\n{format_order(order)}",
-            reply_markup=order_status_menu(order_id),
-        )
-    except Exception as e:
-        logger.error(f"Не удалось отправить админу: {e}")
+    if order_id:
+        await query.edit_message_text(f"✅ Заказ #{order_id} оформлен!\n\n💰 Итого: {order_data['final_price']} BYN (скидка {order_data['discount']}%)")
+        # Формируем заказ для админа с ID из базы
+        order_data["id"] = order_id 
+        try:
+            await context.bot.send_message(
+                chat_id=ADMIN_ID,
+                text=f"🆕 Новый заказ!\n\n{format_order(order_data)}",
+                reply_markup=order_status_menu(order_id),
+            )
+        except Exception as e:
+            logger.error(f"Не удалось отправить админу: {e}")
+    else:
+        await query.edit_message_text("❌ Ошибка при оформлении заказа. Попробуйте позже.")
 
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
@@ -401,11 +464,13 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         code = parts[0].strip().upper()
         discount = int(parts[1])
         hours = int(parts[2])
-        expires_at = (datetime.now() + timedelta(hours=hours)).isoformat()
-        promo_data = {"discount": discount, "expires_at": expires_at, "active": True}
-        save_promo(code, promo_data)
-        context.user_data["awaiting"] = None
-        await update.message.reply_text(f"✅ Промокод {code} сохранен (скидка {discount}%).")
+        expires_at = datetime.now() + timedelta(hours=hours)
+        
+        if save_promo(code, discount, expires_at):
+            context.user_data["awaiting"] = None
+            await update.message.reply_text(f"✅ Промокод {code} сохранен (скидка {discount}%, до {expires_at.strftime('%Y-%m-%d %H:%M')}).")
+        else:
+            await update.message.reply_text("Ошибка сохранения промокода.")
         return
 
     if awaiting == "admin_broadcast":
@@ -437,17 +502,17 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await update.message.reply_text("👑 Админ-меню:", reply_markup=admin_menu())
 
-
 # ========== ЗАПУСК ==========
 
 async def on_startup(app: Application):
-    """Принудительно удаляем старый вебхук, чтобы Telegram не отправлял запросы на мёртвый сервер."""
+    logger.info("Инициализация БД...")
+    init_db()
     logger.info("Удаление старого вебхука...")
     await app.bot.delete_webhook(drop_pending_updates=False)
 
 def main():
-    if not all([TOKEN, ADMIN_ID, UPSTASH_URL, UPSTASH_TOKEN, WEBHOOK_URL]):
-        logger.error("Не все переменные окружения заданы.")
+    if not all([TOKEN, ADMIN_ID, DATABASE_URL, WEBHOOK_URL]):
+        logger.error("Не все переменные окружения заданы (BOT_TOKEN, ADMIN_ID, DATABASE_URL, WEBHOOK_URL).")
         return
 
     try:
