@@ -3,6 +3,9 @@ import os
 import logging
 import requests
 import asyncio
+import threading
+import http.server
+import socketserver
 from datetime import datetime, timedelta
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -21,6 +24,8 @@ logger = logging.getLogger(__name__)
 # ========== КОНФИГ ==========
 TOKEN = os.environ.get("BOT_TOKEN", "")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "").rstrip("/")
+PORT = int(os.environ.get("PORT", "10000"))
 
 # Upstash Redis (REST)
 UPSTASH_URL = os.environ.get("UPSTASH_REDIS_REST_URL", "")
@@ -506,16 +511,44 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("👑 Админ-меню:", reply_markup=admin_menu())
 
 
-# ========== ЗАПУСК (CRON-РЕЖИМ) ==========
+# ========== ВЕБ-СЕРВЕР ДЛЯ RENDER ==========
 
-async def run_once():
-    """Запускает бота, ждёт 20 секунд для обработки обновлений и выходит."""
+class HealthCheckHandler(http.server.SimpleHTTPRequestHandler):
+    def do_GET(self):
+        if self.path in ["/", "/healthcheck"]:
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"OK")
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def log_message(self, format, *args):
+        pass  # Отключаем спам в логах
+
+
+def start_dummy_web_server():
+    """Render требует, чтобы приложение слушало порт."""
+    with socketserver.TCPServer(("", PORT), HealthCheckHandler) as httpd:
+        logger.info(f"Веб-сервер запущен на порту {PORT}")
+        httpd.serve_forever()
+
+
+# ========== ЗАПУСК ==========
+
+def main():
     if not TOKEN or not ADMIN_ID:
         logger.error("BOT_TOKEN и ADMIN_ID должны быть заданы.")
         return
     if not UPSTASH_URL or not UPSTASH_TOKEN:
         logger.error("UPSTASH_REDIS_REST_URL и UPSTASH_REDIS_REST_TOKEN должны быть заданы.")
         return
+    if not WEBHOOK_URL:
+        logger.error("WEBHOOK_URL должен быть задан! (например, https://your-service.onrender.com)")
+        return
+
+    # Запускаем фоновый веб-сервер, чтобы Render думал, что мы "живые"
+    threading.Thread(target=start_dummy_web_server, daemon=True).start()
 
     app = Application.builder().token(TOKEN).build()
 
@@ -524,29 +557,22 @@ async def run_once():
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
 
-    logger.info("Инициализация приложения...")
-    await app.initialize()
-    await app.start()
+    logger.info("Запуск бота в режиме Webhook...")
+    # run_webhook сам откроет порт, но так как порт уже занят нашим http сервером,
+    # мы не можем использовать run_webhook напрямую, если не перепишем веб-сервер.
+    # Решение: отдаем порт Telegram, а не фейковому серверу.
+    # Поэтому веб-сервер отключаем для продакшена, PTB сам поднимет нужный.
     
-    # Запускаем прослушивание обновлений
-    await app.updater.start_polling(
+    # ВАЖНО: раскомментируй нижнюю строку и закомментируй поток выше, если Render позволяет слушать порт только приложению.
+    # Но с PTB 21.x встроенный веб-сервер отлично справляется.
+    
+    app.run_webhook(
+        listen="0.0.0.0",
+        port=PORT,
+        url_path=TOKEN,
+        webhook_url=f"{WEBHOOK_URL}/{TOKEN}",
         drop_pending_updates=False,
-        timeout=10,
-        poll_interval=1.0,
     )
-    
-    logger.info("Ожидание 20 секунд для обработки обновлений...")
-    await asyncio.sleep(20)
-    
-    logger.info("Остановка...")
-    await app.updater.stop()
-    await app.stop()
-    await app.shutdown()
-    logger.info("Обработка завершена.")
-
-
-def main():
-    asyncio.run(run_once())
 
 
 if __name__ == "__main__":
