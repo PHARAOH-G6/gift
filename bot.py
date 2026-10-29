@@ -2,6 +2,8 @@ import json
 import os
 import logging
 import requests
+import asyncio
+import threading
 from datetime import datetime, timedelta
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -519,7 +521,7 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("👑 Админ-меню:", reply_markup=admin_menu())
 
 
-# ========== ЗАПУСК ==========
+# ========== ЗАПУСК (CRON-РЕЖИМ) ==========
 
 def main():
     if not TOKEN or not ADMIN_ID:
@@ -537,15 +539,34 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
 
     logger.info("Запуск обработки обновлений (cron-режим)...")
-    
-    # ВАЖНО: run_once=True заставляет бота сделать один проход и выйти
-    app.run_polling(
-        drop_pending_updates=False,
-        close_loop=False,
-        timeout=10,
-        poll_interval=1.0,
-        run_once=True 
-    )
+
+    # Запускаем run_polling в отдельном потоке, чтобы иметь возможность остановить его по таймауту
+    def run_bot():
+        try:
+            app.run_polling(
+                drop_pending_updates=False,
+                close_loop=False,
+                timeout=10,
+                poll_interval=1.0,
+            )
+        except Exception as e:
+            logger.error(f"run_polling error: {e}")
+
+    bot_thread = threading.Thread(target=run_bot, daemon=True)
+    bot_thread.start()
+
+    # Ждём 25 секунд, чтобы обработать накопившиеся обновления
+    import time
+    time.sleep(25)
+
+    # Останавливаем приложение
+    logger.info("Остановка бота...")
+    try:
+        asyncio.run(app.stop_running())
+    except Exception as e:
+        logger.error(f"stop_running error: {e}")
+
+    bot_thread.join(timeout=10)
     logger.info("Обработка завершена.")
 
 
