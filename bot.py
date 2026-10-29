@@ -82,7 +82,6 @@ def load_data():
             "users": [],
             "next_order_id": 1,
         }
-    # миграция на случай отсутствия полей
     data.setdefault("orders", {})
     data.setdefault("promos", {})
     data.setdefault("users", [])
@@ -538,11 +537,14 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
 
     logger.info("Запуск обработки обновлений (cron-режим)...")
+    
+    # ВАЖНО: run_once=True заставляет бота сделать один проход и выйти
     app.run_polling(
         drop_pending_updates=False,
         close_loop=False,
         timeout=10,
         poll_interval=1.0,
+        run_once=True 
     )
     logger.info("Обработка завершена.")
 
