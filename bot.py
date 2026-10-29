@@ -2,6 +2,7 @@ import json
 import os
 import logging
 import requests
+import asyncio
 from datetime import datetime, timedelta
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -520,6 +521,12 @@ def main():
         logger.error("WEBHOOK_URL должен быть задан! (например, https://your-service.onrender.com)")
         return
 
+    # Фикс для Python 3.14: создаём event loop вручную, если его нет
+    try:
+        asyncio.get_event_loop()
+    except RuntimeError:
+        asyncio.set_event_loop(asyncio.new_event_loop())
+
     app = Application.builder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
@@ -528,8 +535,7 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
 
     logger.info(f"Запуск Webhook на порту {PORT} с URL {WEBHOOK_URL}...")
-    
-    # PTB сам поднимет веб-сервер на порту PORT
+
     app.run_webhook(
         listen="0.0.0.0",
         port=PORT,
