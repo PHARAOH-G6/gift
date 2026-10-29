@@ -2,10 +2,6 @@ import json
 import os
 import logging
 import requests
-import asyncio
-import threading
-import http.server
-import socketserver
 from datetime import datetime, timedelta
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -511,30 +507,7 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("👑 Админ-меню:", reply_markup=admin_menu())
 
 
-# ========== ВЕБ-СЕРВЕР ДЛЯ RENDER ==========
-
-class HealthCheckHandler(http.server.SimpleHTTPRequestHandler):
-    def do_GET(self):
-        if self.path in ["/", "/healthcheck"]:
-            self.send_response(200)
-            self.end_headers()
-            self.wfile.write(b"OK")
-        else:
-            self.send_response(404)
-            self.end_headers()
-
-    def log_message(self, format, *args):
-        pass  # Отключаем спам в логах
-
-
-def start_dummy_web_server():
-    """Render требует, чтобы приложение слушало порт."""
-    with socketserver.TCPServer(("", PORT), HealthCheckHandler) as httpd:
-        logger.info(f"Веб-сервер запущен на порту {PORT}")
-        httpd.serve_forever()
-
-
-# ========== ЗАПУСК ==========
+# ========== ЗАПУСК (WEBHOOK) ==========
 
 def main():
     if not TOKEN or not ADMIN_ID:
@@ -547,9 +520,6 @@ def main():
         logger.error("WEBHOOK_URL должен быть задан! (например, https://your-service.onrender.com)")
         return
 
-    # Запускаем фоновый веб-сервер, чтобы Render думал, что мы "живые"
-    threading.Thread(target=start_dummy_web_server, daemon=True).start()
-
     app = Application.builder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
@@ -557,15 +527,9 @@ def main():
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
 
-    logger.info("Запуск бота в режиме Webhook...")
-    # run_webhook сам откроет порт, но так как порт уже занят нашим http сервером,
-    # мы не можем использовать run_webhook напрямую, если не перепишем веб-сервер.
-    # Решение: отдаем порт Telegram, а не фейковому серверу.
-    # Поэтому веб-сервер отключаем для продакшена, PTB сам поднимет нужный.
+    logger.info(f"Запуск Webhook на порту {PORT} с URL {WEBHOOK_URL}...")
     
-    # ВАЖНО: раскомментируй нижнюю строку и закомментируй поток выше, если Render позволяет слушать порт только приложению.
-    # Но с PTB 21.x встроенный веб-сервер отлично справляется.
-    
+    # PTB сам поднимет веб-сервер на порту PORT
     app.run_webhook(
         listen="0.0.0.0",
         port=PORT,
