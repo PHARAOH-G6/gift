@@ -142,6 +142,24 @@ def get_order(order_id):
         logger.error(f"Ошибка получения заказа: {e}")
         return None
 
+def get_active_orders():
+    """Возвращает список активных заказов (не выполненных и не отмененных)."""
+    try:
+        conn = get_conn()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute("""
+            SELECT id, username, final_price, status FROM orders 
+            WHERE status NOT IN ('completed', 'cancelled')
+            ORDER BY id DESC LIMIT 20
+        """)
+        orders = cur.fetchall()
+        cur.close()
+        conn.close()
+        return orders
+    except Exception as e:
+        logger.error(f"Ошибка получения активных заказов: {e}")
+        return []
+
 def update_order_status(order_id, new_status):
     try:
         conn = get_conn()
@@ -229,12 +247,25 @@ def admin_menu():
     ]
     return InlineKeyboardMarkup(keyboard)
 
+def active_orders_menu(orders):
+    """Клавиатура со списком активных заказов."""
+    keyboard = []
+    for o in orders:
+        # Обрезаем username, если он слишком длинный
+        uname = o['username'] or "—"
+        btn_text = f"#{o['id']} | {uname} | {o['final_price']} BYN | {o['status']}"
+        keyboard.append([InlineKeyboardButton(btn_text, callback_data=f"adm_order_{o['id']}")])
+    
+    keyboard.append([InlineKeyboardButton("⬅️ Назад в админку", callback_data="admin_back")])
+    return InlineKeyboardMarkup(keyboard)
+
 def order_status_menu(order_id):
     keyboard = [
         [InlineKeyboardButton("✅ Подтверждён", callback_data=f"status_{order_id}_confirmed")],
         [InlineKeyboardButton("🚚 Отправлен", callback_data=f"status_{order_id}_shipped")],
         [InlineKeyboardButton("✔️ Выполнен", callback_data=f"status_{order_id}_completed")],
         [InlineKeyboardButton("❌ Отменён", callback_data=f"status_{order_id}_cancelled")],
+        [InlineKeyboardButton("⬅️ Назад к списку", callback_data="admin_orders")],
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -246,7 +277,6 @@ def format_order(order):
     promo = order.get("promo", "—")
     discount = order.get("discount", 0)
     
-    # Безопасное получение даты (если нет - ставим текущую)
     created_at = order.get("created_at")
     if created_at:
         date_str = created_at.strftime('%Y-%m-%d %H:%M')
@@ -350,6 +380,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await finalize_order(query, context)
         return
 
+    # --- АДМИНКА ---
+    if data_cb == "admin_back":
+        await query.edit_message_text("👑 Админ-меню:", reply_markup=admin_menu())
+        return
+
     if data_cb == "admin_promo":
         context.user_data["awaiting"] = "admin_promo"
         await query.edit_message_text("Введите промокод в формате:\n`КОД ПРОЦЕНТ ЧАСОВ`\n\nПример: `SALE10 10 48`", parse_mode="Markdown")
@@ -361,8 +396,23 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data_cb == "admin_orders":
-        await query.edit_message_text("Введите ID заказа для смены статуса:")
-        context.user_data["awaiting"] = "admin_status_id"
+        orders = get_active_orders()
+        if not orders:
+            await query.edit_message_text("Активных заказов нет.", reply_markup=admin_menu())
+            return
+        
+        text = "📋 Выберите заказ для смены статуса:\n(Выполненные и отменённые скрыты)"
+        await query.edit_message_text(text, reply_markup=active_orders_menu(orders))
+        return
+
+    if data_cb.startswith("adm_order_"):
+        order_id = data_cb.split("_")[2]
+        order = get_order(order_id)
+        if order:
+            text = f"Заказ #{order_id}\n\n{format_order(order)}"
+            await query.edit_message_text(text, reply_markup=order_status_menu(order_id))
+        else:
+            await query.edit_message_text(f"❌ Заказ {order_id} не найден.")
         return
 
     if data_cb.startswith("status_"):
@@ -373,7 +423,18 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         order = get_order(order_id)
         if order:
             if update_order_status(order_id, new_status):
-                await query.edit_message_text(f"Статус заказа #{order_id} изменён на: {new_status}")
+                await query.answer("Статус обновлён!")
+                # Если статус финальный, удаляем сообщение из чата (или меняем на текст)
+                if new_status in ["completed", "cancelled"]:
+                    await query.edit_message_text(f"✅ Заказ #{order_id} закрыт со статусом: {new_status}")
+                else:
+                    # Если промежуточный, возвращаемся к списку
+                    orders = get_active_orders()
+                    if orders:
+                        await query.edit_message_text("📋 Выберите заказ для смены статуса:\n(Выполненные и отменённые скрыты)", reply_markup=active_orders_menu(orders))
+                    else:
+                        await query.edit_message_text("Активных заказов нет.", reply_markup=admin_menu())
+
                 try:
                     await context.bot.send_message(chat_id=order["user_id"], text=f"📬 Статус вашего заказа #{order_id} обновлён: {new_status}")
                 except Exception as e:
@@ -406,28 +467,15 @@ async def finalize_order(query, context):
         order_data["id"] = order_id 
         
         try:
-            logger.info(f"Отправка заказа #{order_id} админу {ADMIN_ID}...")
             await context.bot.send_message(
                 chat_id=ADMIN_ID,
                 text=f"🆕 Новый заказ!\n\n{format_order(order_data)}",
                 reply_markup=order_status_menu(order_id),
             )
-            logger.info(f"Заказ #{order_id} успешно отправлен админу.")
         except Exception as e:
             logger.error(f"ОШИБКА отправки админу: {e}")
-            try:
-                await context.bot.send_message(
-                    chat_id=ADMIN_ID,
-                    text=f"🆕 Новый заказ (без кнопок)!\n\n{format_order(order_data)}"
-                )
-            except Exception as e2:
-                logger.error(f"Повторная ошибка: {e2}")
     else:
         await query.edit_message_text("❌ Ошибка при оформлении заказа в базе данных.")
-        try:
-            await context.bot.send_message(chat_id=ADMIN_ID, text="⚠️ Внимание: произошла ошибка записи заказа в базу. Проверьте логи Neon.")
-        except Exception:
-            pass
 
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
@@ -500,16 +548,6 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Рассылка отправлена {sent} пользователям.")
         return
 
-    if awaiting == "admin_status_id":
-        oid = text.strip()
-        order = get_order(oid)
-        if order:
-            await update.message.reply_text(f"Заказ #{oid}. Выберите новый статус:", reply_markup=order_status_menu(oid))
-            context.user_data["awaiting"] = None
-        else:
-            await update.message.reply_text(f"Заказ {oid} не найден.")
-        return
-
 async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         await update.message.reply_text("⛔ Нет доступа.")
@@ -526,7 +564,7 @@ async def on_startup(app: Application):
 
 def main():
     if not all([TOKEN, ADMIN_ID, DATABASE_URL, WEBHOOK_URL]):
-        logger.error("Не все переменные окружения заданы (BOT_TOKEN, ADMIN_ID, DATABASE_URL, WEBHOOK_URL).")
+        logger.error("Не все переменные окружения заданы.")
         return
 
     try:
