@@ -216,7 +216,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await query.answer()  # Отвечаем сразу, чтобы кнопка не "висела"
     data_cb = query.data
 
     if data_cb == "back_main":
@@ -440,6 +440,11 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ========== ЗАПУСК ==========
 
+async def on_startup(app: Application):
+    """Принудительно удаляем старый вебхук, чтобы Telegram не отправлял запросы на мёртвый сервер."""
+    logger.info("Удаление старого вебхука...")
+    await app.bot.delete_webhook(drop_pending_updates=False)
+
 def main():
     if not all([TOKEN, ADMIN_ID, UPSTASH_URL, UPSTASH_TOKEN, WEBHOOK_URL]):
         logger.error("Не все переменные окружения заданы.")
@@ -450,7 +455,7 @@ def main():
     except RuntimeError:
         asyncio.set_event_loop(asyncio.new_event_loop())
 
-    app = Application.builder().token(TOKEN).build()
+    app = Application.builder().token(TOKEN).post_init(on_startup).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("admin", admin_command))
     app.add_handler(CallbackQueryHandler(button_handler))
