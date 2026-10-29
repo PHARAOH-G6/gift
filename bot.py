@@ -29,8 +29,6 @@ DATABASE_URL = os.environ.get("DATABASE_URL", "")
 # ========== БАЗА ДАННЫХ (POSTGRESQL) ==========
 
 def get_conn():
-    """Устанавливает соединение с базой данных Neon."""
-    # Увеличиваем таймаут, так как Neon может просыпаться
     return psycopg2.connect(DATABASE_URL, sslmode='require', connect_timeout=15)
 
 def init_db():
@@ -247,6 +245,14 @@ def format_order(order):
     exclude = order.get("exclude", "—")
     promo = order.get("promo", "—")
     discount = order.get("discount", 0)
+    
+    # Безопасное получение даты (если нет - ставим текущую)
+    created_at = order.get("created_at")
+    if created_at:
+        date_str = created_at.strftime('%Y-%m-%d %H:%M')
+    else:
+        date_str = datetime.now().strftime('%Y-%m-%d %H:%M')
+
     lines = [
         f"🆔 Заказ #{order['id']}",
         f"📂 {order['category_name']} → {order['subcategory_name']}",
@@ -256,7 +262,7 @@ def format_order(order):
         f"✅ Предпочтения: {prefs}",
         f"🚫 Исключить: {exclude}",
         f"👤 Покупатель: @{order.get('username', '—')} (ID: {order['user_id']})",
-        f"📅 {order['created_at'].strftime('%Y-%m-%d %H:%M') if order['created_at'] else '—'}",
+        f"📅 {date_str}",
         f"📌 Статус: {order.get('status', 'новый')}",
     ]
     return "\n".join(lines)
@@ -399,7 +405,6 @@ async def finalize_order(query, context):
         await query.edit_message_text(f"✅ Заказ #{order_id} оформлен!\n\n💰 Итого: {order_data['final_price']} BYN (скидка {order_data['discount']}%)")
         order_data["id"] = order_id 
         
-        # Отправка админу с ОБРАБОТКОЙ ОШИБОК
         try:
             logger.info(f"Отправка заказа #{order_id} админу {ADMIN_ID}...")
             await context.bot.send_message(
@@ -410,7 +415,6 @@ async def finalize_order(query, context):
             logger.info(f"Заказ #{order_id} успешно отправлен админу.")
         except Exception as e:
             logger.error(f"ОШИБКА отправки админу: {e}")
-            # Попытка отправить хотя бы текстовое сообщение без кнопок
             try:
                 await context.bot.send_message(
                     chat_id=ADMIN_ID,
@@ -420,7 +424,6 @@ async def finalize_order(query, context):
                 logger.error(f"Повторная ошибка: {e2}")
     else:
         await query.edit_message_text("❌ Ошибка при оформлении заказа в базе данных.")
-        # Уведомляем админа о сбое
         try:
             await context.bot.send_message(chat_id=ADMIN_ID, text="⚠️ Внимание: произошла ошибка записи заказа в базу. Проверьте логи Neon.")
         except Exception:
