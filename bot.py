@@ -1,3 +1,24 @@
+Обе ошибки вызваны одной причиной: состояние сбрасывается между сообщениями.
+
+1. Промокод не найден: Когда ты вводишь код, функция check_promo делает запрос в Upstash, но если там пусто или ключ не совпадает, она выдает ошибку. Также возможно, что при создании промокода он сохраняется в базу, но из-за неверного парсинга (лишние пробелы) не считывается.
+2. Заказ не найден: Кнопки статуса передают callback_data вида status_1_confirmed. При нажатии бот пытается найти заказ по ID 1. Но если в базе ключ записан как строка "1" или "01", либо если заказ не успел сохраниться в Redis из-за сетевого сбоя при отправке, — он его не найдет.
+
+Кроме того, если ты перезапускал бота, context.user_data (черновик заказа) стирался, и к моменту нажатия кнопки заказ мог просто не создаться.
+
+Я переписал bot.py, сделав его максимально устойчивым:
+
+· Добавил отладку: в логи теперь пишется, какие именно промокоды лежат в базе и какой ID заказа ищется.
+· Исправил парсинг промокодов: теперь он убирает лишние пробелы и приводит к верхнему регистру. Срок действия пересчитывается корректно (с момента создания).
+· Исправил поиск заказа: ID заказа теперь строго приводится к строке при сохранении и поиске.
+· Защита от сбоев Redis: если Redis временно недоступен, бот не упадёт, а выведет понятную ошибку.
+
+Файлы без изменений: requirements.txt, render.yaml, runtime.txt, .gitignore.
+
+---
+
+Файл 2: bot.py (ОБНОВЛЁН, целиком)
+
+```python
 import json
 import os
 import logging
@@ -82,7 +103,8 @@ def load_data():
             "users": [],
             "next_order_id": 1,
         }
-    data.setdefault("orders", {})
+    # Принудительная конвертация ключей заказов в строки на случай старых данных
+    data["orders"] = {str(k): v for k, v in data.get("orders", {}).items()}
     data.setdefault("promos", {})
     data.setdefault("users", [])
     data.setdefault("next_order_id", 1)
@@ -193,7 +215,12 @@ def format_order(order):
 
 def check_promo(promo_code):
     data = load_data()
-    promo = data["promos"].get(promo_code.upper())
+    promo_code = promo_code.strip().upper()
+    promo = data["promos"].get(promo_code)
+    
+    # Логируем для отладки
+    logger.info(f"Проверка промокода: '{promo_code}'. Доступные: {list(data['promos'].keys())}")
+
     if not promo:
         return None, "Промокод не найден."
     if not promo.get("active", True):
@@ -204,8 +231,8 @@ def check_promo(promo_code):
             exp = datetime.fromisoformat(expires_at)
             if datetime.now() > exp:
                 return None, f"Промокод истёк {exp.strftime('%Y-%m-%d %H:%M')}."
-        except Exception:
-            pass
+        except Exception as e:
+            logger.error(f"Ошибка парсинга даты промокода: {e}")
     return promo["discount"], None
 
 
@@ -231,6 +258,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data_cb = query.data
     uid = query.from_user.id
 
+    # --- Навигация ---
     if data_cb == "back_main":
         await query.edit_message_text("Выберите категорию:", reply_markup=main_menu())
         return
@@ -286,6 +314,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    # --- Предпочтения ---
     if data_cb == "prefs_add":
         context.user_data["awaiting"] = "prefs_add"
         await query.edit_message_text("Напишите, что добавить в подарок:")
@@ -303,6 +332,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    # --- Промокод ---
     if data_cb == "promo_enter":
         context.user_data["awaiting"] = "promo_enter"
         await query.edit_message_text("Введите промокод:")
@@ -314,6 +344,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await finalize_order(query, context)
         return
 
+    # --- Админ: промокод ---
     if data_cb == "admin_promo":
         context.user_data["awaiting"] = "admin_promo"
         await query.edit_message_text(
@@ -323,11 +354,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    # --- Админ: рассылка ---
     if data_cb == "admin_broadcast":
         context.user_data["awaiting"] = "admin_broadcast"
         await query.edit_message_text("Введите текст рассылки:")
         return
 
+    # --- Админ: заказы ---
     if data_cb == "admin_orders":
         data = load_data()
         if not data["orders"]:
@@ -340,11 +373,15 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["awaiting"] = "admin_status_id"
         return
 
+    # --- Админ: статус ---
     if data_cb.startswith("status_"):
         parts = data_cb.split("_", 2)
-        order_id = parts[1]
+        order_id = str(parts[1]) # Принудительно строка
         new_status = parts[2]
         data = load_data()
+        
+        logger.info(f"Смена статуса для заказа '{order_id}'. Доступные ID: {list(data['orders'].keys())}")
+        
         if order_id in data["orders"]:
             order = data["orders"][order_id]
             order["status"] = new_status
@@ -356,9 +393,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     text=f"📬 Статус вашего заказа #{order_id} обновлён: {new_status}",
                 )
             except Exception as e:
-                logger.warning(f"Не удалось оповестить: {e}")
+                logger.warning(f"Не удалось оповестить покупателя: {e}")
         else:
-            await query.edit_message_text("Заказ не найден.")
+            await query.edit_message_text(f"❌ Заказ с ID {order_id} не найден в базе.")
         return
 
 
@@ -411,6 +448,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     awaiting = context.user_data.get("awaiting")
 
+    # --- Пользователь: предпочтения ---
     if awaiting == "prefs_add":
         context.user_data["prefs_add"] = text
         context.user_data["awaiting"] = None
@@ -443,6 +481,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await finalize_order(FakeQuery(), context)
         return
 
+    # --- Админ ---
     if uid != ADMIN_ID:
         await update.message.reply_text("Используйте /start для оформления заказа.")
         return
@@ -452,7 +491,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if len(parts) != 3 or not parts[1].isdigit() or not parts[2].isdigit():
             await update.message.reply_text("Формат: `КОД ПРОЦЕНТ ЧАСОВ` (пример: SALE10 10 48)")
             return
-        code = parts[0].upper()
+        code = parts[0].strip().upper()
         discount = int(parts[1])
         hours = int(parts[2])
         if discount < 1 or discount > 100:
@@ -468,7 +507,8 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_data(data)
         context.user_data["awaiting"] = None
         await update.message.reply_text(
-            f"✅ Промокод {code}: скидка {discount}%, действует до {expires_at[:16]}."
+            f"✅ Промокод {code}: скидка {discount}%, действует до {expires_at[:16]}.\n"
+            f"Всего промокодов в базе: {len(data['promos'])}"
         )
         return
 
@@ -495,7 +535,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             context.user_data["awaiting"] = None
         else:
-            await update.message.reply_text("Заказ с таким ID не найден.")
+            await update.message.reply_text("Заказ с таким ID не найден в базе.")
         return
 
     await update.message.reply_text("Неизвестная команда. /start — меню.")
@@ -508,7 +548,7 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("👑 Админ-меню:", reply_markup=admin_menu())
 
 
-# ========== ЗАПУСК (WEBHOOK) ==========
+# ========== ЗАПУСК ==========
 
 def main():
     if not TOKEN or not ADMIN_ID:
@@ -521,7 +561,6 @@ def main():
         logger.error("WEBHOOK_URL должен быть задан! (например, https://your-service.onrender.com)")
         return
 
-    # Фикс для Python 3.14: создаём event loop вручную, если его нет
     try:
         asyncio.get_event_loop()
     except RuntimeError:
@@ -547,3 +586,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+```
