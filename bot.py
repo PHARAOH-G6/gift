@@ -1,10 +1,10 @@
 import json
 import os
 import logging
-import requests
 import asyncio
 from datetime import datetime, timedelta
 
+from upstash_redis import Redis
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -24,123 +24,80 @@ ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "").rstrip("/")
 PORT = int(os.environ.get("PORT", "10000"))
 
-# Upstash Redis (REST)
+# Upstash Redis (SDK)
 UPSTASH_URL = os.environ.get("UPSTASH_REDIS_REST_URL", "")
 UPSTASH_TOKEN = os.environ.get("UPSTASH_REDIS_REST_TOKEN", "")
 
-# Локальный кэш на случай сбоев Redis
-LOCAL_PROMOS = {}
-
-# ========== UPSTASH REDIS (REST API) ==========
-
-def redis_set(key, value):
-    """Надежная запись в Upstash Redis."""
-    if not UPSTASH_URL or not UPSTASH_TOKEN:
-        return False
-    try:
-        # Если передали dict/list — сериализуем в JSON строку
-        if isinstance(value, (dict, list)):
-            value_str = json.dumps(value, ensure_ascii=False)
-        else:
-            value_str = str(value)
-            
-        # В Upstash REST API правильный формат для SET: тело запроса - просто строка
-        r = requests.post(
-            f"{UPSTASH_URL}/set/{key}",
-            headers={
-                "Authorization": f"Bearer {UPSTASH_TOKEN}",
-                "Content-Type": "text/plain",
-            },
-            data=value_str.encode('utf-8'),
-            timeout=10,
-        )
-        if r.status_code != 200:
-            logger.error(f"Redis SET error {key}: {r.status_code} {r.text}")
-            return False
-        return True
-    except Exception as e:
-        logger.error(f"redis_set exception {key}: {e}")
-        return False
-
-
-def redis_get(key):
-    """Надежное чтение из Upstash Redis."""
-    if not UPSTASH_URL or not UPSTASH_TOKEN:
-        return None
-    try:
-        r = requests.get(
-            f"{UPSTASH_URL}/get/{key}",
-            headers={"Authorization": f"Bearer {UPSTASH_TOKEN}"},
-            timeout=10,
-        )
-        data = r.json()
-        result = data.get("result")
-        if result is None:
-            return None
-            
-        # Пытаемся распарсить JSON (для заказов и списков)
-        try:
-            return json.loads(result)
-        except (json.JSONDecodeError, TypeError):
-            # Если это обычная строка (например, счетчик)
-            return result
-    except Exception as e:
-        logger.error(f"redis_get exception {key}: {e}")
-        return None
-
+# Инициализация клиента Upstash
+redis = Redis(url=UPSTASH_URL, token=UPSTASH_TOKEN)
 
 # ========== ЛОГИКА ДАННЫХ ==========
 
 def save_promo(code, data):
-    LOCAL_PROMOS[code] = data
-    redis_set(f"promo:{code}", data)
-
+    redis.set(f"promo:{code}", json.dumps(data, ensure_ascii=False))
 
 def get_promo(code):
-    if code in LOCAL_PROMOS:
-        return LOCAL_PROMOS[code]
-    return redis_get(f"promo:{code}")
-
+    result = redis.get(f"promo:{code}")
+    if result is None:
+        return None
+    try:
+        return json.loads(result)
+    except json.JSONDecodeError:
+        return None
 
 def get_next_order_id():
-    val = redis_get("order_counter")
-    if not val:
-        redis_set("order_counter", 1)
+    val = redis.get("order_counter")
+    if val is None:
+        redis.set("order_counter", 1)
         return "1"
     try:
         new_val = int(val) + 1
-    except ValueError:
+    except (ValueError, TypeError):
         new_val = 2
-    redis_set("order_counter", new_val)
+    redis.set("order_counter", new_val)
     return str(new_val)
-
 
 def save_order(order_id, order_data):
     logger.info(f"Сохранение заказа #{order_id} в Redis...")
-    success = redis_set(f"order:{order_id}", order_data)
-    if success:
-        logger.info(f"Заказ #{order_id} успешно сохранен.")
-    else:
-        logger.error(f"ОШИБКА сохранения заказа #{order_id}!")
-
+    redis.set(f"order:{order_id}", json.dumps(order_data, ensure_ascii=False))
+    logger.info(f"Заказ #{order_id} успешно сохранен.")
 
 def get_order(order_id):
     logger.info(f"Чтение заказа #{order_id} из Redis...")
-    order = redis_get(f"order:{order_id}")
-    if order:
-        logger.info(f"Заказ #{order_id} найден.")
-    else:
+    result = redis.get(f"order:{order_id}")
+    if result is None:
         logger.warning(f"Заказ #{order_id} НЕ найден в Redis.")
-    return order
-
+        return None
+    try:
+        order = json.loads(result)
+        logger.info(f"Заказ #{order_id} найден.")
+        return order
+    except json.JSONDecodeError:
+        return None
 
 def add_user(uid):
-    users = redis_get("users") or []
-    if not isinstance(users, list):
-        users = []
-    if uid not in users:
-        users.append(uid)
-        redis_set("users", users)
+    users = redis.get("users")
+    if users is None:
+        users_list = []
+    else:
+        try:
+            users_list = json.loads(users)
+            if not isinstance(users_list, list):
+                users_list = []
+        except json.JSONDecodeError:
+            users_list = []
+    if uid not in users_list:
+        users_list.append(uid)
+        redis.set("users", json.dumps(users_list, ensure_ascii=False))
+
+def get_users():
+    users = redis.get("users")
+    if users is None:
+        return []
+    try:
+        return json.loads(users)
+    except json.JSONDecodeError:
+        return []
 
 
 # ========== КЛАВИАТУРЫ ==========
@@ -151,7 +108,6 @@ def main_menu():
         [InlineKeyboardButton("🎁 Для парня", callback_data="cat_boy")],
     ]
     return InlineKeyboardMarkup(keyboard)
-
 
 def subcat_menu(category):
     if category == "girl":
@@ -172,7 +128,6 @@ def subcat_menu(category):
     keyboard.append([InlineKeyboardButton("⬅️ Назад", callback_data="back_main")])
     return InlineKeyboardMarkup(keyboard)
 
-
 def size_menu(category, subcategory):
     keyboard = [
         [InlineKeyboardButton("📦 Бокс S — 30 BYN", callback_data=f"size_S_{category}_{subcategory}")],
@@ -182,7 +137,6 @@ def size_menu(category, subcategory):
     ]
     return InlineKeyboardMarkup(keyboard)
 
-
 def prefs_menu():
     keyboard = [
         [InlineKeyboardButton("✅ Добавить предпочтения", callback_data="prefs_add")],
@@ -191,14 +145,12 @@ def prefs_menu():
     ]
     return InlineKeyboardMarkup(keyboard)
 
-
 def promo_menu():
     keyboard = [
         [InlineKeyboardButton("🎟 Ввести промокод", callback_data="promo_enter")],
         [InlineKeyboardButton("⏭ Без промокода", callback_data="promo_skip")],
     ]
     return InlineKeyboardMarkup(keyboard)
-
 
 def admin_menu():
     keyboard = [
@@ -207,7 +159,6 @@ def admin_menu():
         [InlineKeyboardButton("📋 Заказы", callback_data="admin_orders")],
     ]
     return InlineKeyboardMarkup(keyboard)
-
 
 def order_status_menu(order_id):
     keyboard = [
@@ -240,13 +191,11 @@ def format_order(order):
     ]
     return "\n".join(lines)
 
-
 def check_promo(promo_code):
     code = promo_code.strip().upper()
     promo = get_promo(code)
     if not promo:
         return None, "Промокод не найден."
-        
     expires_at = promo.get("expires_at")
     if expires_at:
         try:
@@ -264,7 +213,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     add_user(update.effective_user.id)
     text = "🎁 Добро пожаловать в магазин подарочных наборов!\n\nВыберите категорию:"
     await update.message.reply_text(text, reply_markup=main_menu())
-
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -355,7 +303,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parts = data_cb.split("_", 2)
         order_id = str(parts[1])
         new_status = parts[2]
-        
         order = get_order(order_id)
         if order:
             order["status"] = new_status
@@ -368,7 +315,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await query.edit_message_text(f"❌ Заказ {order_id} не найден в базе данных.")
         return
-
 
 async def finalize_order(query, context):
     order_id = get_next_order_id()
@@ -393,7 +339,6 @@ async def finalize_order(query, context):
         "status": "новый",
     }
     
-    # Сохраняем и проверяем, что заказ реально записался
     save_order(order_id, order)
     
     await query.edit_message_text(f"✅ Заказ #{order_id} оформлен!\n\n💰 Итого: {final_price} BYN (скидка {discount}%)")
@@ -406,7 +351,6 @@ async def finalize_order(query, context):
         )
     except Exception as e:
         logger.error(f"Не удалось отправить админу: {e}")
-
 
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
@@ -458,16 +402,14 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         discount = int(parts[1])
         hours = int(parts[2])
         expires_at = (datetime.now() + timedelta(hours=hours)).isoformat()
-        
         promo_data = {"discount": discount, "expires_at": expires_at, "active": True}
         save_promo(code, promo_data)
-        
         context.user_data["awaiting"] = None
         await update.message.reply_text(f"✅ Промокод {code} сохранен (скидка {discount}%).")
         return
 
     if awaiting == "admin_broadcast":
-        users = redis_get("users") or []
+        users = get_users()
         sent = 0
         for u in users:
             try:
@@ -488,7 +430,6 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await update.message.reply_text(f"Заказ {oid} не найден.")
         return
-
 
 async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
