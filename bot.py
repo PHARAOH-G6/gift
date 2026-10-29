@@ -3,7 +3,6 @@ import os
 import logging
 import requests
 import asyncio
-import threading
 from datetime import datetime, timedelta
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -32,7 +31,6 @@ REDIS_KEY = "giftbot_data"
 # ========== UPSTASH REDIS (REST API) ==========
 
 def redis_get():
-    """Читает JSON из Upstash Redis."""
     if not UPSTASH_URL or not UPSTASH_TOKEN:
         logger.error("UPSTASH_URL или UPSTASH_TOKEN не заданы")
         return None
@@ -53,7 +51,6 @@ def redis_get():
 
 
 def redis_set(data):
-    """Записывает JSON в Upstash Redis."""
     if not UPSTASH_URL or not UPSTASH_TOKEN:
         logger.error("UPSTASH_URL или UPSTASH_TOKEN не заданы")
         return False
@@ -75,7 +72,6 @@ def redis_set(data):
 
 
 def load_data():
-    """Загружает данные; если ключа нет — возвращает дефолт."""
     data = redis_get()
     if data is None:
         return {
@@ -194,7 +190,6 @@ def format_order(order):
 
 
 def check_promo(promo_code):
-    """Проверяет промокод: существует, активен, не истёк. Возвращает (discount, error)."""
     data = load_data()
     promo = data["promos"].get(promo_code.upper())
     if not promo:
@@ -234,7 +229,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data_cb = query.data
     uid = query.from_user.id
 
-    # --- Навигация ---
     if data_cb == "back_main":
         await query.edit_message_text("Выберите категорию:", reply_markup=main_menu())
         return
@@ -290,7 +284,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # --- Предпочтения ---
     if data_cb == "prefs_add":
         context.user_data["awaiting"] = "prefs_add"
         await query.edit_message_text("Напишите, что добавить в подарок:")
@@ -308,7 +301,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # --- Промокод ---
     if data_cb == "promo_enter":
         context.user_data["awaiting"] = "promo_enter"
         await query.edit_message_text("Введите промокод:")
@@ -320,7 +312,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await finalize_order(query, context)
         return
 
-    # --- Админ: промокод ---
     if data_cb == "admin_promo":
         context.user_data["awaiting"] = "admin_promo"
         await query.edit_message_text(
@@ -330,13 +321,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # --- Админ: рассылка ---
     if data_cb == "admin_broadcast":
         context.user_data["awaiting"] = "admin_broadcast"
         await query.edit_message_text("Введите текст рассылки:")
         return
 
-    # --- Админ: заказы ---
     if data_cb == "admin_orders":
         data = load_data()
         if not data["orders"]:
@@ -349,7 +338,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["awaiting"] = "admin_status_id"
         return
 
-    # --- Админ: статус ---
     if data_cb.startswith("status_"):
         parts = data_cb.split("_", 2)
         order_id = parts[1]
@@ -373,7 +361,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def finalize_order(query, context):
-    """Создаёт заказ с учётом скидки и отправляет админу."""
     data = load_data()
     order_id = str(data["next_order_id"])
     data["next_order_id"] += 1
@@ -422,7 +409,6 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     awaiting = context.user_data.get("awaiting")
 
-    # --- Пользователь: предпочтения ---
     if awaiting == "prefs_add":
         context.user_data["prefs_add"] = text
         context.user_data["awaiting"] = None
@@ -455,7 +441,6 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await finalize_order(FakeQuery(), context)
         return
 
-    # --- Админ ---
     if uid != ADMIN_ID:
         await update.message.reply_text("Используйте /start для оформления заказа.")
         return
@@ -523,7 +508,8 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ========== ЗАПУСК (CRON-РЕЖИМ) ==========
 
-def main():
+async def run_once():
+    """Запускает бота, ждёт 20 секунд для обработки обновлений и выходит."""
     if not TOKEN or not ADMIN_ID:
         logger.error("BOT_TOKEN и ADMIN_ID должны быть заданы.")
         return
@@ -538,36 +524,29 @@ def main():
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
 
-    logger.info("Запуск обработки обновлений (cron-режим)...")
-
-    # Запускаем run_polling в отдельном потоке, чтобы иметь возможность остановить его по таймауту
-    def run_bot():
-        try:
-            app.run_polling(
-                drop_pending_updates=False,
-                close_loop=False,
-                timeout=10,
-                poll_interval=1.0,
-            )
-        except Exception as e:
-            logger.error(f"run_polling error: {e}")
-
-    bot_thread = threading.Thread(target=run_bot, daemon=True)
-    bot_thread.start()
-
-    # Ждём 25 секунд, чтобы обработать накопившиеся обновления
-    import time
-    time.sleep(25)
-
-    # Останавливаем приложение
-    logger.info("Остановка бота...")
-    try:
-        asyncio.run(app.stop_running())
-    except Exception as e:
-        logger.error(f"stop_running error: {e}")
-
-    bot_thread.join(timeout=10)
+    logger.info("Инициализация приложения...")
+    await app.initialize()
+    await app.start()
+    
+    # Запускаем прослушивание обновлений
+    await app.updater.start_polling(
+        drop_pending_updates=False,
+        timeout=10,
+        poll_interval=1.0,
+    )
+    
+    logger.info("Ожидание 20 секунд для обработки обновлений...")
+    await asyncio.sleep(20)
+    
+    logger.info("Остановка...")
+    await app.updater.stop()
+    await app.stop()
+    await app.shutdown()
     logger.info("Обработка завершена.")
+
+
+def main():
+    asyncio.run(run_once())
 
 
 if __name__ == "__main__":
