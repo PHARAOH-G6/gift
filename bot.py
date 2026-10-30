@@ -136,11 +136,15 @@ def init_db():
             );
         """)
         cur.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS address TEXT;")
+        
+        # Создаем таблицу пользователей и принудительно добавляем колонку lang
         cur.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id BIGINT PRIMARY KEY, lang VARCHAR(2) DEFAULT 'ru'
             );
         """)
+        cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS lang VARCHAR(2) DEFAULT 'ru';")
+        
         conn.commit()
         cur.close()
         conn.close()
@@ -155,18 +159,26 @@ def get_user_lang(uid):
         row = cur.fetchone()
         cur.close()
         conn.close()
-        return row[0] if row else "ru"
-    except Exception:
+        if row and row[0]:
+            return row[0]
+        return "ru"
+    except Exception as e:
+        logger.error(f"Ошибка получения языка: {e}")
         return "ru"
 
 def set_user_lang(uid, lang):
     try:
         conn = get_conn()
         cur = conn.cursor()
-        cur.execute("INSERT INTO users (user_id, lang) VALUES (%s, %s) ON CONFLICT (user_id) DO UPDATE SET lang = EXCLUDED.lang", (uid, lang))
+        cur.execute(
+            "INSERT INTO users (user_id, lang) VALUES (%s, %s) "
+            "ON CONFLICT (user_id) DO UPDATE SET lang = EXCLUDED.lang", 
+            (uid, lang)
+        )
         conn.commit()
         cur.close()
         conn.close()
+        logger.info(f"Пользователь {uid} сменил язык на {lang}")
     except Exception as e:
         logger.error(f"Ошибка смены языка: {e}")
 
