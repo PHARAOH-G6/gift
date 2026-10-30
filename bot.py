@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 
 import psycopg2
 from psycopg2.extras import RealDictCursor
+from fastapi import FastAPI, Request, Response
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -137,7 +138,6 @@ def init_db():
         """)
         cur.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS address TEXT;")
         
-        # Создаем таблицу пользователей и принудительно добавляем колонку lang
         cur.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id BIGINT PRIMARY KEY, lang VARCHAR(2) DEFAULT 'ru'
@@ -159,11 +159,9 @@ def get_user_lang(uid):
         row = cur.fetchone()
         cur.close()
         conn.close()
-        if row and row[0]:
-            return row[0]
+        if row and row[0]: return row[0]
         return "ru"
-    except Exception as e:
-        logger.error(f"Ошибка получения языка: {e}")
+    except Exception:
         return "ru"
 
 def set_user_lang(uid, lang):
@@ -178,7 +176,6 @@ def set_user_lang(uid, lang):
         conn.commit()
         cur.close()
         conn.close()
-        logger.info(f"Пользователь {uid} сменил язык на {lang}")
     except Exception as e:
         logger.error(f"Ошибка смены языка: {e}")
 
@@ -688,27 +685,46 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await update.message.reply_text("👑 Админ-меню:", reply_markup=admin_menu())
 
-# ========== ЗАПУСК ==========
+# ========== ЗАПУСК (FastAPI + Telegram Webhook) ==========
 
-async def on_startup(app: Application):
+app = FastAPI()
+ptb_app = Application.builder().token(TOKEN).build()
+
+# Добавляем хендлеры
+ptb_app.add_handler(CommandHandler("start", start))
+ptb_app.add_handler(CommandHandler("admin", admin_command))
+ptb_app.add_handler(CallbackQueryHandler(button_handler))
+ptb_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
+
+@app.on_event("startup")
+async def on_startup():
     init_db()
-    await app.bot.delete_webhook(drop_pending_updates=False)
+    await ptb_app.initialize()
+    await ptb_app.start()
+    
+    # Устанавливаем вебхук в Telegram
+    webhook_url = f"{WEBHOOK_URL}/{TOKEN}"
+    await ptb_app.bot.set_webhook(url=webhook_url, drop_pending_updates=False)
+    logger.info(f"Webhook установлен на {webhook_url}")
 
-def main():
-    if not all([TOKEN, ADMIN_ID, DATABASE_URL, WEBHOOK_URL]): return
-    try: asyncio.get_event_loop()
-    except RuntimeError: asyncio.set_event_loop(asyncio.new_event_loop())
+@app.on_event("shutdown")
+async def on_shutdown():
+    await ptb_app.stop()
+    await ptb_app.shutdown()
 
-    app = Application.builder().token(TOKEN).post_init(on_startup).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("admin", admin_command))
-    app.add_handler(CallbackQueryHandler(button_handler))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
+# Эндпоинт для cron-job.org (и для проверки работоспособности)
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
 
-    app.run_webhook(
-        listen="0.0.0.0", port=PORT, url_path=TOKEN,
-        webhook_url=f"{WEBHOOK_URL}/{TOKEN}", drop_pending_updates=False,
-    )
+# Эндпоинт для Telegram
+@app.post(f"/{TOKEN}")
+async def telegram_webhook(request: Request):
+    data = await request.json()
+    update = Update.de_json(data, ptb_app.bot)
+    await ptb_app.process_update(update)
+    return Response(status_code=200)
 
 if __name__ == "__main__":
-    main()
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=PORT)
