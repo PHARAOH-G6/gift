@@ -46,10 +46,12 @@ TEXTS = {
         "prefs_add": "✅ Добавить предпочтения",
         "prefs_exclude": "🚫 Исключить из подарка",
         "prefs_skip": "⏭ Пропустить",
-        "write_prefs": "Напишите, что добавить в подарок:",
+        "write_prefs": "Напишите, что добавить в подарок.\n\n⚠️ Обратите внимание: бюджет на дополнительные предпочтения не должен превышать 50% от стоимости коробки. Товары 18+ выдаются только по паспорту:",
         "write_exclude": "Напишите, что исключить из подарка:",
         "prefs_saved": "Предпочтения сохранены.",
         "exclude_saved": "Исключения сохранены.",
+        "write_address": "🏠 Пожалуйста, напишите ваш адрес доставки (город, улица, дом, квартира):",
+        "address_saved": "Адрес сохранён.",
         "have_promo": "У вас есть промокод?",
         "promo_enter": "🎟 Ввести промокод",
         "promo_skip": "⏭ Без промокода",
@@ -60,7 +62,7 @@ TEXTS = {
         "order_error": "❌ Ошибка при оформлении заказа.",
         "status_update": "📬 Статус вашего заказа #{id} обновлён: {status}",
         "lang_select": "🇷🇺 Выберите язык / 🇬🇧 Choose language:",
-        "start_btn": "🏠 В начало"
+        "start_btn": "🏠 В начало",
     },
     "en": {
         "welcome": "🎁 Welcome to the gift shop!\n\nChoose a category:",
@@ -80,10 +82,12 @@ TEXTS = {
         "prefs_add": "✅ Add preferences",
         "prefs_exclude": "🚫 Exclude from gift",
         "prefs_skip": "⏭ Skip",
-        "write_prefs": "Write what to add to the gift:",
+        "write_prefs": "Write what to add to the gift.\n\n⚠️ Please note: the budget for additional preferences should not exceed 50% of the box price. 18+ items are issued only upon passport presentation:",
         "write_exclude": "Write what to exclude:",
         "prefs_saved": "Preferences saved.",
         "exclude_saved": "Exclusions saved.",
+        "write_address": "🏠 Please write your delivery address (city, street, building, apartment):",
+        "address_saved": "Address saved.",
         "have_promo": "Do you have a promo code?",
         "promo_enter": "🎟 Enter promo code",
         "promo_skip": "⏭ Skip promo",
@@ -94,7 +98,7 @@ TEXTS = {
         "order_error": "❌ Error placing order.",
         "status_update": "📬 Your order #{id} status has been updated: {status}",
         "lang_select": "🇷🇺 Выберите язык / 🇬🇧 Choose language:",
-        "start_btn": "🏠 Main Menu"
+        "start_btn": "🏠 Main Menu",
     }
 }
 
@@ -127,10 +131,11 @@ def init_db():
                 id SERIAL PRIMARY KEY, user_id BIGINT NOT NULL, username VARCHAR(255),
                 category_name VARCHAR(100), subcategory_name VARCHAR(100), size VARCHAR(10),
                 price INT, discount INT DEFAULT 0, final_price INT, preferences TEXT,
-                exclude TEXT, promo VARCHAR(50), created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                exclude TEXT, address TEXT, promo VARCHAR(50), created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 status VARCHAR(50) DEFAULT 'new'
             );
         """)
+        cur.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS address TEXT;")
         cur.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id BIGINT PRIMARY KEY, lang VARCHAR(2) DEFAULT 'ru'
@@ -150,7 +155,7 @@ def get_user_lang(uid):
         row = cur.fetchone()
         cur.close()
         conn.close()
-        return row[0] if row else "ru" # По умолчанию русский
+        return row[0] if row else "ru"
     except Exception:
         return "ru"
 
@@ -210,13 +215,13 @@ def save_order(order_data):
         conn = get_conn()
         cur = conn.cursor()
         cur.execute("""
-            INSERT INTO orders (user_id, username, category_name, subcategory_name, size, price, discount, final_price, preferences, exclude, promo)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id;
+            INSERT INTO orders (user_id, username, category_name, subcategory_name, size, price, discount, final_price, preferences, exclude, address, promo)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id;
         """, (
             order_data["user_id"], order_data["username"], order_data["category_name"],
             order_data["subcategory_name"], order_data["size"], order_data["price"],
             order_data["discount"], order_data["final_price"], order_data["preferences"],
-            order_data["exclude"], order_data["promo"]
+            order_data["exclude"], order_data["address"], order_data["promo"]
         ))
         order_id = cur.fetchone()[0]
         conn.commit()
@@ -266,12 +271,11 @@ def update_order_status(order_id, new_status):
 # ========== КЛАВИАТУРЫ ==========
 
 def get_t(uid):
-    """Возвращает словарь с переводами для пользователя."""
     lang = get_user_lang(uid)
     return TEXTS.get(lang, TEXTS["ru"]), lang
 
 def home_btn(text):
-    return [InlineKeyboardButton(text, callback_data="back_main")]
+    return [InlineKeyboardButton(text["home"], callback_data="back_main")]
 
 def main_menu(text):
     keyboard = [
@@ -346,16 +350,34 @@ def order_status_menu(order_id):
 
 # ========== ХЕЛПЕРЫ ==========
 
+def get_category_name(key, lang="ru"):
+    mapping = {
+        "girl": "cat_girl", "boy": "cat_boy",
+        "mom": "girl_mom", "friend": "girl_friend", "love": "girl_love", "sister": "girl_sister",
+        "dad": "boy_dad", "brother": "boy_brother"
+    }
+    if lang == "en" and key == "friend": return "For Friend"
+    if lang == "en" and key == "love": return "For Beloved"
+    
+    text_key = mapping.get(key)
+    if not text_key: return key
+    
+    return TEXTS.get(lang, TEXTS["ru"]).get(text_key, key)
+
 def format_order_admin(order):
-    """Заказ для админа всегда на русском."""
     status_ru = STATUS_TRANSLATIONS.get(order.get('status', 'new'), {}).get("ru", order.get('status'))
     date_str = order.get("created_at").strftime('%Y-%m-%d %H:%M') if order.get("created_at") else datetime.now().strftime('%Y-%m-%d %H:%M')
+    
+    cat_ru = get_category_name(order['category_name'], "ru")
+    sub_ru = get_category_name(order['subcategory_name'], "ru")
+
     return (
         f"🆔 Заказ #{order['id']}\n"
-        f"📂 {order['category_name']} → {order['subcategory_name']}\n"
+        f"📂 {cat_ru} → {sub_ru}\n"
         f"📦 {order['size']} — {order['price']} BYN\n"
         f"🏷 Промокод: {order.get('promo', '—')} (скидка {order.get('discount', 0)}%)\n"
         f"💰 Итого: {order['final_price']} BYN\n"
+        f"🏠 Адрес: {order.get('address', '—')}\n"
         f"✅ Предпочтения: {order.get('preferences', '—')}\n"
         f"🚫 Исключить: {order.get('exclude', '—')}\n"
         f"👤 Покупатель: @{order.get('username', '—')} (ID: {order['user_id']})\n"
@@ -374,7 +396,6 @@ def check_promo(promo_code):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    # Проверяем, есть ли пользователь в базе. Если нет - спрашиваем язык.
     try:
         conn = get_conn()
         cur = conn.cursor()
@@ -383,7 +404,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cur.close()
         conn.close()
     except:
-        exists = True # Если ошибка БД, просто пускаем
+        exists = True
 
     if not exists:
         keyboard = [[InlineKeyboardButton("🇷🇺 Русский", callback_data="lang_ru")], [InlineKeyboardButton("🇬🇧 English", callback_data="lang_en")]]
@@ -400,7 +421,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = query.from_user.id
     text, lang = get_t(uid)
 
-    # --- Смена языка ---
     if data_cb == "change_lang":
         keyboard = [[InlineKeyboardButton("🇷🇺 Русский", callback_data="lang_ru")], [InlineKeyboardButton("🇬🇧 English", callback_data="lang_en")]]
         await query.edit_message_text(text["lang_select"], reply_markup=InlineKeyboardMarkup(keyboard))
@@ -409,11 +429,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data_cb.startswith("lang_"):
         new_lang = data_cb.split("_")[1]
         set_user_lang(uid, new_lang)
-        text, _ = get_t(uid) # Перезагружаем тексты
+        text, _ = get_t(uid)
         await query.edit_message_text(text["welcome"], reply_markup=main_menu(text))
         return
 
-    # --- Навигация ---
     if data_cb == "back_main":
         await query.edit_message_text(text["choose_cat"], reply_markup=main_menu(text))
         return
@@ -422,7 +441,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cat = data_cb.split("_", 1)[1]
         cat_name = text["cat_girl"] if cat == "girl" else text["cat_boy"]
         context.user_data["category"] = cat
-        context.user_data["category_name"] = cat_name
         await query.edit_message_text(text["choose_subcat"].format(cat=cat_name), reply_markup=subcat_menu(text, cat))
         return
 
@@ -431,14 +449,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cat = parts[1]
         sub_key = parts[2]
         
-        sub_map = {"mom": "girl_mom", "friend": "girl_friend", "love": "girl_love", "sister": "girl_sister", "dad": "boy_dad", "brother": "boy_brother"}
-        if cat == "boy" and sub_key == "friend": sub_name = text["boy_friend"]
-        elif cat == "boy" and sub_key == "love": sub_name = text["boy_love"]
-        else: sub_name = text[sub_map.get(sub_key, "girl_mom")]
-
+        sub_name = get_category_name(sub_key, lang)
         context.user_data["subcategory"] = sub_key
-        context.user_data["subcategory_name"] = sub_name
-        await query.edit_message_text(text["choose_size"].format(cat=context.user_data['category_name'], sub=sub_name), reply_markup=size_menu(text, cat, sub_key))
+        await query.edit_message_text(text["choose_size"].format(cat=text["cat_girl"] if cat=="girl" else text["cat_boy"], sub=sub_name), reply_markup=size_menu(text, cat, sub_key))
         return
 
     if data_cb.startswith("size_"):
@@ -463,7 +476,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data_cb == "prefs_skip":
-        await query.edit_message_text(text["have_promo"], reply_markup=promo_menu(text))
+        context.user_data["awaiting"] = "address" 
+        await query.edit_message_text(text["write_address"])
         return
 
     if data_cb == "promo_enter":
@@ -477,7 +491,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await finalize_order(query, context)
         return
 
-    # --- АДМИНКА ---
     if data_cb == "admin_back":
         await query.edit_message_text("👑 Админ-меню:", reply_markup=admin_menu())
         return
@@ -517,7 +530,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         order = get_order(order_id)
         if order:
             if update_order_status(order_id, new_status):
-                # Статус на русском для админа
                 status_ru = STATUS_TRANSLATIONS.get(new_status, {}).get("ru", new_status)
                 if new_status in ["completed", "cancelled"]:
                     await query.edit_message_text(f"✅ Заказ #{order_id} закрыт со статусом: {status_ru}", reply_markup=admin_menu())
@@ -528,7 +540,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     else:
                         await query.edit_message_text("Активных заказов нет.", reply_markup=admin_menu())
 
-                # Отправляем клиенту на ЕГО языке
                 user_lang = get_user_lang(order["user_id"])
                 status_client = STATUS_TRANSLATIONS.get(new_status, {}).get(user_lang, new_status)
                 try:
@@ -551,14 +562,15 @@ async def finalize_order(query, context):
     order_data = {
         "user_id": uid,
         "username": query.from_user.username or "—",
-        "category_name": context.user_data.get("category_name", "—"),
-        "subcategory_name": context.user_data.get("subcategory_name", "—"),
+        "category_name": context.user_data.get("category", "—"),
+        "subcategory_name": context.user_data.get("subcategory", "—"),
         "size": context.user_data.get("size", "—"),
         "price": context.user_data.get("price", 0),
         "discount": context.user_data.get("discount", 0),
         "final_price": int(context.user_data.get("price", 0) * (100 - context.user_data.get("discount", 0)) / 100),
         "preferences": context.user_data.get("prefs_add", "—"),
         "exclude": context.user_data.get("prefs_exclude", "—"),
+        "address": context.user_data.get("address", "—"),
         "promo": context.user_data.get("applied_promo") or "—",
     }
     
@@ -590,15 +602,22 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if awaiting == "prefs_add":
         context.user_data["prefs_add"] = text
-        context.user_data["awaiting"] = None
+        context.user_data["awaiting"] = "address" 
         await update.message.reply_text(t["prefs_saved"])
-        await update.message.reply_text(t["have_promo"], reply_markup=promo_menu(t))
+        await update.message.reply_text(t["write_address"])
         return
 
     if awaiting == "prefs_exclude":
         context.user_data["prefs_exclude"] = text
-        context.user_data["awaiting"] = None
+        context.user_data["awaiting"] = "address" 
         await update.message.reply_text(t["exclude_saved"])
+        await update.message.reply_text(t["write_address"])
+        return
+
+    if awaiting == "address":
+        context.user_data["address"] = text
+        context.user_data["awaiting"] = None
+        await update.message.reply_text(t["address_saved"])
         await update.message.reply_text(t["have_promo"], reply_markup=promo_menu(t))
         return
 
@@ -645,7 +664,6 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sent = 0
         for u in users:
             try:
-                # Отправляем на языке пользователя
                 await context.bot.send_message(chat_id=u, text=f"📢 {text}")
                 sent += 1
             except Exception: pass
@@ -683,4 +701,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
