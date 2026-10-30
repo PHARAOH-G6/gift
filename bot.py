@@ -291,7 +291,7 @@ def subcat_menu(text, category):
     else:
         subs = [(text["boy_dad"], "sub_boy_dad"), (text["boy_friend"], "sub_boy_friend"), (text["boy_love"], "sub_boy_love"), (text["boy_brother"], "sub_boy_brother")]
     keyboard = [[InlineKeyboardButton(name, callback_data=cb)] for name, cb in subs]
-    keyboard.append(home_btn(text["home"]))
+    keyboard.append(home_btn(text))
     return InlineKeyboardMarkup(keyboard)
 
 def size_menu(text, category, subcategory):
@@ -299,7 +299,7 @@ def size_menu(text, category, subcategory):
         [InlineKeyboardButton(text["size_S"], callback_data=f"size_S_{category}_{subcategory}")],
         [InlineKeyboardButton(text["size_L"], callback_data=f"size_L_{category}_{subcategory}")],
         [InlineKeyboardButton(text["size_XL"], callback_data=f"size_XL_{category}_{subcategory}")],
-        home_btn(text["home"])
+        home_btn(text)
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -308,7 +308,7 @@ def prefs_menu(text):
         [InlineKeyboardButton(text["prefs_add"], callback_data="prefs_add")],
         [InlineKeyboardButton(text["prefs_exclude"], callback_data="prefs_exclude")],
         [InlineKeyboardButton(text["prefs_skip"], callback_data="prefs_skip")],
-        home_btn(text["home"])
+        home_btn(text)
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -316,7 +316,7 @@ def promo_menu(text):
     keyboard = [
         [InlineKeyboardButton(text["promo_enter"], callback_data="promo_enter")],
         [InlineKeyboardButton(text["promo_skip"], callback_data="promo_skip")],
-        home_btn(text["home"])
+        home_btn(text)
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -361,7 +361,6 @@ def get_category_name(key, lang="ru"):
     
     text_key = mapping.get(key)
     if not text_key: return key
-    
     return TEXTS.get(lang, TEXTS["ru"]).get(text_key, key)
 
 def format_order_admin(order):
