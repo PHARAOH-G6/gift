@@ -283,8 +283,8 @@ def get_t(uid):
     lang = get_user_lang(uid)
     return TEXTS.get(lang, TEXTS["ru"]), lang
 
-# Нижняя клавиатура (всегда на экране)
 def get_reply_keyboard(text):
+    """Возвращает нижнюю клавиатуру с кнопкой В начало"""
     keyboard = [[KeyboardButton(text["start_btn"])]]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, is_persistent=True)
 
@@ -425,14 +425,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     text, _ = get_t(uid)
-    await update.message.reply_text(text["welcome"], reply_markup=main_menu(text))
-
-async def home_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик нижней кнопки 'В начало'"""
-    uid = update.effective_user.id
-    context.user_data.clear()  # Сбрасываем текущий черновик заказа
-    text, _ = get_t(uid)
-    await update.message.reply_text(text["welcome"], reply_markup=main_menu(text))
+    # Отправляем приветствие и СРАЗУ прикрепляем нижнюю клавиатуру
+    await update.message.reply_text(
+        text["welcome"], 
+        reply_markup=main_menu(text)
+    )
+    # Отправляем пустое сообщение с Reply-клавиатурой, чтобы она появилась
+    await update.message.reply_text(
+        "Меню внизу 👇" if _ == "ru" else "Menu at the bottom 👇", 
+        reply_markup=get_reply_keyboard(text)
+    )
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -450,9 +452,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         new_lang = data_cb.split("_")[1]
         set_user_lang(uid, new_lang)
         text, _ = get_t(uid)
-        # Обновляем и текст и Reply-кнопку под новым языком
+        # Обновляем Inline-меню
         await query.edit_message_text(text["welcome"], reply_markup=main_menu(text))
-        await query.message.reply_text(" ", reply_markup=get_reply_keyboard(text)) # Трюк для обновления нижней клавиатуры
+        # Отправляем сообщение, чтобы обновить нижнюю Reply-кнопку на новый язык
+        await query.message.reply_text("Меню внизу 👇" if new_lang == "ru" else "Menu at the bottom 👇", reply_markup=get_reply_keyboard(text))
         return
 
     if data_cb == "back_main":
@@ -622,7 +625,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     awaiting = context.user_data.get("awaiting")
     t, _ = get_t(uid)
 
-    # Если нажата Reply-кнопка "В начало"
+    # Обработка нажатия нижней кнопки "В начало"
     if text == t["start_btn"] or text == "🏠 В начало" or text == "🏠 Main Menu":
         context.user_data.clear()
         await update.message.reply_text(t["welcome"], reply_markup=main_menu(t))
@@ -710,7 +713,6 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 app = FastAPI()
 ptb_app = Application.builder().token(TOKEN).build()
 
-# Добавляем хендлеры
 ptb_app.add_handler(CommandHandler("start", start))
 ptb_app.add_handler(CommandHandler("admin", admin_command))
 ptb_app.add_handler(CallbackQueryHandler(button_handler))
@@ -722,7 +724,6 @@ async def on_startup():
     await ptb_app.initialize()
     await ptb_app.start()
     
-    # Устанавливаем вебхук в Telegram
     webhook_url = f"{WEBHOOK_URL}/{TOKEN}"
     await ptb_app.bot.set_webhook(url=webhook_url, drop_pending_updates=False)
     logger.info(f"Webhook установлен на {webhook_url}")
