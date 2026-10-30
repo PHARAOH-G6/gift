@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from fastapi import FastAPI, Request, Response
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -283,6 +283,11 @@ def get_t(uid):
     lang = get_user_lang(uid)
     return TEXTS.get(lang, TEXTS["ru"]), lang
 
+# Нижняя клавиатура (всегда на экране)
+def get_reply_keyboard(text):
+    keyboard = [[KeyboardButton(text["start_btn"])]]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, is_persistent=True)
+
 def home_btn(text):
     return [InlineKeyboardButton(text["home"], callback_data="back_main")]
 
@@ -422,6 +427,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text, _ = get_t(uid)
     await update.message.reply_text(text["welcome"], reply_markup=main_menu(text))
 
+async def home_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик нижней кнопки 'В начало'"""
+    uid = update.effective_user.id
+    context.user_data.clear()  # Сбрасываем текущий черновик заказа
+    text, _ = get_t(uid)
+    await update.message.reply_text(text["welcome"], reply_markup=main_menu(text))
+
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -438,7 +450,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         new_lang = data_cb.split("_")[1]
         set_user_lang(uid, new_lang)
         text, _ = get_t(uid)
+        # Обновляем и текст и Reply-кнопку под новым языком
         await query.edit_message_text(text["welcome"], reply_markup=main_menu(text))
+        await query.message.reply_text(" ", reply_markup=get_reply_keyboard(text)) # Трюк для обновления нижней клавиатуры
         return
 
     if data_cb == "back_main":
@@ -608,6 +622,12 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     awaiting = context.user_data.get("awaiting")
     t, _ = get_t(uid)
 
+    # Если нажата Reply-кнопка "В начало"
+    if text == t["start_btn"] or text == "🏠 В начало" or text == "🏠 Main Menu":
+        context.user_data.clear()
+        await update.message.reply_text(t["welcome"], reply_markup=main_menu(t))
+        return
+
     if awaiting == "prefs_add":
         context.user_data["prefs_add"] = text
         context.user_data["awaiting"] = "address" 
@@ -712,12 +732,10 @@ async def on_shutdown():
     await ptb_app.stop()
     await ptb_app.shutdown()
 
-# Эндпоинт для cron-job.org (и для проверки работоспособности)
 @app.get("/health")
 async def health():
     return {"status": "ok"}
 
-# Эндпоинт для Telegram
 @app.post(f"/{TOKEN}")
 async def telegram_webhook(request: Request):
     data = await request.json()
